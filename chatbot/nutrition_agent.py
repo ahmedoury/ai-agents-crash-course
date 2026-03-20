@@ -1,14 +1,34 @@
 from pathlib import Path
+from pydantic import BaseModel
 
 import chromadb
 from agents import (
     Agent,
     function_tool,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
+    RunContextWrapper,
+    Runner,
+    TResponseInputItem,
+    input_guardrail, 
 )
 
 chroma_path = Path(__file__).parent.parent / "chroma"
 chroma_client = chromadb.PersistentClient(path=str(chroma_path))
 nutrition_db = chroma_client.get_collection(name="nutrition_db")
+
+
+class notAboutFood(BaseModel) : 
+    only_about_food: bool
+    """Whether the user is only talking about food and not about arbitrary topics"""
+
+guardrail_agent = Agent(
+    name= "guardRail_agent", 
+    instructions= " check if the response is talking about food and nutrition", 
+    output_type= notAboutFood
+)
+
+
 
 
 @function_tool
@@ -44,12 +64,33 @@ def calorie_lookup_tool(query: str, max_results: int = 3) -> str:
     return "Nutrition Information:\n" + "\n".join(formatted_results)
 
 
-nutrition_agent = Agent(
+@input_guardrail
+async def food_topic_guardrail(
+    ctx: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    result = await Runner.run(guardrail_agent, input, context=ctx.context)
+
+    return GuardrailFunctionOutput(
+        output_info=result.final_output,
+        tripwire_triggered=(not result.final_output.only_about_food),
+    )
+
+
+try:
+    nutrition_agent = Agent(
     name="Nutrition Assistant",
     instructions="""
     You are a helpful nutrition assistant giving out calorie information.
     You give concise answers.
     If you need to look up calorie information, use the calorie_lookup_tool.
+
+    You need to talk only about food and nutrition nothing else
     """,
     tools=[calorie_lookup_tool],
+    input_guardrails=[food_topic_guardrail],
 )
+except InputGuardrailTripwireTriggered as e:
+    print(f"Off-topic guardrail tripped")
+
+
+
